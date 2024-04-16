@@ -18,6 +18,37 @@ import os
 def index():
     return jsonify(message="This is the beginning of our API")
 
+@app.route('/api/v1/register')
+def register():
+    return jsonify(message="This is the registration")
+
+@app.route('/api/v1/auth/login')
+def login():
+    return jsonify(message="This is the login")
+
+@app.route('/api/v1/auth/logout')
+def logout():
+    return jsonify(message="This is the logout")
+
+@app.route('/api/v1/users/{user_id}/posts', methods = ['POST'])
+def addposts():
+    return jsonify(message="This is the add post")
+
+@app.route('/api/v1/users/{user_id}/posts', methods = ['GET'])
+def returnposts():
+    return jsonify(message="This is the return post")
+
+@app.route('/api/v1/posts/{post_id}/like')
+def like():
+    return jsonify(message="This is the like")
+
+@app.route('/api/users/{user_id}/follow', methods = ['POST'])
+def follow():
+    return jsonify(message="This is the follow")
+
+@app.route('/api/v1/posts')
+def allposts():
+    return jsonify(message="This is the posts for all users")
 
 ###
 # The functions below should be applicable to all Flask apps.

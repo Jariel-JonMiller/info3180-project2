@@ -46,7 +46,7 @@ class Post(db.Model):
         self.user_id = user_id
         self.photo = photo
         self.caption = caption
-        self.created_on = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.created_on = datetime.now()
 
 
     def __repr__(self):

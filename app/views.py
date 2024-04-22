@@ -1,21 +1,55 @@
+"""
+Flask Documentation:     https://flask.palletsprojects.com/
+Jinja2 Documentation:    https://jinja.palletsprojects.com/
+Werkzeug Documentation:  https://werkzeug.palletsprojects.com/
+This file creates your application.
+"""
+from app import app
+from flask import render_template, request, jsonify, send_file
 import os
-from flask import request, jsonify
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
-from . import app
 from .models import db, User, Post, Like, Follow
 # Import check_password_hash here
 from werkzeug.security import check_password_hash
 
 
+###
+# Routing for your application.
+###
+
+@app.route('/')
+def index():
+    return jsonify(message="This is the beginning of our API")
 
 
-# @app.route('/api/v1/users/register', methods=['POST'])
-# def register_user():
-#     data = request.json
-#     new_user = User(username=data['username'], password=data['password'], firstname=data['firstname'], lastname=data['lastname'], email=data['email'])
-#     db.session.add(new_user)
-#     db.session.commit()
-#     return jsonify({'message': 'User registered successfully'})
+@app.route('/api/v1/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+    firstname = data.get('firstname')
+    lastname = data.get('lastname')
+    email = data.get('email')
+    location = data.get('location', '')  # Provide default value if not present
+    # Provide default value if not present
+    biography = data.get('biography', '')
+    # Provide default value if not present
+    profile_photo = data.get('profile_photo', '')
+
+    # Check if required fields are present
+    if not (username and password and firstname and lastname and email):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    # Create a new user
+    new_user = User(username=username, password=password, firstname=firstname,
+                    lastname=lastname, email=email, location=location,
+                    biography=biography, profile_photo=profile_photo)
+
+    # Add the new user to the database
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({'message': 'User registered successfully'})
 
 
 @app.route('/api/v1/auth/login', methods=['POST'])
@@ -30,12 +64,64 @@ def login():
         return jsonify({"message": "Invalid username or password"}), 401
 
     access_token = create_access_token(identity=user.id)
-    return jsonify({"token": access_token, "message": "User successfully logged in."})
+    return jsonify({"message": "User successfully logged in.","token": access_token})
+
 
 @app.route('/api/v1/auth/logout', methods=['POST'])
-def logout_user():
-    logout_user()  # Call the logout_user() function provided by Flask-Login
+def logout():
     return jsonify({'message': 'User logged out successfully'})
+
+
+@app.route('/api/v1/users/<int:user_id>/posts', methods=['POST'])
+@jwt_required()
+def create_post(user_id):
+    current_user_id = get_jwt_identity()
+
+    # Check if the current user is authorized to create a post for the specified user
+    if current_user_id != user_id:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    # Extract photo and caption from the request JSON data
+    data = request.json
+    photo = data.get('photo')
+    # Assuming 'description' is the field name for caption
+    caption = data.get('description')
+
+    # Create a new Post object
+    new_post = Post(user_id=user_id, photo=photo, caption=caption)
+
+    # Add the new post to the database session and commit the transaction
+    db.session.add(new_post)
+    db.session.commit()
+
+    return jsonify({"message": "Successfully created a new post"}), 201
+
+
+@app.route('/api/v1/users/<int:user_id>/posts', methods=['GET'])
+def get_posts(user_id):
+    # Retrieve the user object
+    user = User.query.get(user_id)
+
+    # Check if the user exists
+    if user is None:
+        return jsonify({'message': 'User not found'}), 404
+
+    # Retrieve the posts associated with the user
+    posts = user.user_posts
+
+    # Serialize posts into the desired JSON format
+    serialized_posts = []
+    for post in posts:
+        serialized_post = {
+            "id": post.id,
+            "user_id": post.user_id,
+            "photo": post.photo,
+            "description": post.caption,
+            "created_on": post.created_on
+        }
+        serialized_posts.append(serialized_post)
+
+    return jsonify({'posts': serialized_posts})
 
 
 @app.route('/api/v1/users/<int:user_id>/follow', methods=['POST'])
@@ -49,10 +135,27 @@ def follow_user(user_id):
 
     return jsonify({"message": "You are now following that user."}), 201
 
+@app.route('/api/v1/posts', methods=['GET'])
+def allposts():
+    posts = Post.query.all()
+    serialized_posts = []
+    for post in posts:
+        serialized_post = {
+            "id": post.id,
+            "user_id": post.user_id,
+            "photo": post.photo,
+            "caption": post.caption,
+            "created_on": post.created_on.strftime("%Y-%m-%d %H:%M:%S"),
+            # Assuming 'likes' is a relationship in the Post model
+            "likes": len(post.likes)
+        }
+        serialized_posts.append(serialized_post)
+    return jsonify({'posts': serialized_posts})
+
 
 @app.route('/api/v1/posts/<int:post_id>/like', methods=['POST'])
 @jwt_required()
-def like_post(post_id):
+def like(post_id):
     current_user_id = get_jwt_identity()
 
     like = Like.query.filter_by(
@@ -70,42 +173,6 @@ def like_post(post_id):
 
 # Route to add a post to a user's feed
 
-
-@app.route('/api/v1/users/<int:user_id>/posts', methods=['POST'])
-@jwt_required()
-def create_post(user_id):
-    current_user_id = get_jwt_identity()
-    if current_user_id != user_id:
-        return jsonify({"message": "Unauthorized"}), 401
-
-    data = request.json
-    photo = data.get('photo')
-    caption = data.get('caption')
-
-    new_post = Post(user_id=user_id, photo=photo, caption=caption)
-    db.session.add(new_post)
-    db.session.commit()
-
-    return jsonify({"message": "Successfully created a new post"}), 201
-
-
-
-# Route to get a user's posts
-
-
-@app.route('/api/v1/users/<int:user_id>/posts', methods=['GET'])
-def get_user_posts(user_id):
-    user = User.query.get(user_id)
-    posts = user.posts
-    return jsonify({'posts': [post.caption for post in posts]})
-
-# Route to get all posts for all users
-
-
-@app.route('/api/v1/posts', methods=['GET'])
-def get_all_posts():
-    posts = Post.query.all()
-    return jsonify({'posts': [post.caption for post in posts]})
 
 # The functions below should be applicable to all Flask apps
 

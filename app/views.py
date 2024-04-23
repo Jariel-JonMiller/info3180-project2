@@ -9,6 +9,7 @@ from flask import render_template, request, jsonify, send_file
 import os
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from .models import db, User, Post, Like, Follow
+from .forms import LoginForm, NewPostForm, RegisterForm
 # Import check_password_hash here
 from werkzeug.security import check_password_hash
 

@@ -35,10 +35,19 @@ def register():
     biography = data.get('biography', '')
     # Provide default value if not present
     profile_photo = data.get('profile_photo', '')
+    joined_on = request.json.get('joined_on')
 
     # Check if required fields are present
     if not (username and password and firstname and lastname and email):
         return jsonify({'message': 'Missing required fields'}), 400
+
+    # Check if username already exists in database
+    if User.query.filter_by(username=username).first() is not None:
+        return jsonify({'error': 'Username already exists'}), 400
+
+    # Check if email already exists in database
+    if User.query.filter_by(email=email).first() is not None:
+        return jsonify({'error': 'Email already exists'}), 400
 
     # Create a new user
     new_user = User(username=username, password=password, firstname=firstname,

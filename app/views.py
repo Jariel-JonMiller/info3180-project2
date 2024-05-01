@@ -4,213 +4,376 @@ Jinja2 Documentation:    https://jinja.palletsprojects.com/
 Werkzeug Documentation:  https://werkzeug.palletsprojects.com/
 This file creates your application.
 """
-from app import app
-from flask import render_template, request, jsonify, send_file
-import os
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
-from .models import db, User, Post, Like, Follow
-from .forms import LoginForm, NewPostForm, RegisterForm
-# Import check_password_hash here
-from werkzeug.security import check_password_hash
 
+import datetime
+import os
+from functools import wraps
+
+import jwt
+from flask import g, jsonify, request, send_file, send_from_directory
+from flask_wtf.csrf import generate_csrf
+from werkzeug.security import check_password_hash
+from werkzeug.utils import secure_filename
+
+from app import app, db
+from app.forms import LoginForm, PostForm, RegistrationForm
+from app.models import Follow, Like, Post, User
 
 ###
 # Routing for your application.
 ###
 
-@app.route('/')
+
+@app.route("/")
 def index():
     return jsonify(message="This is the beginning of our API")
 
 
-@app.route('/api/v1/register', methods=['POST'])
+@app.route("/api/v1/csrf-token", methods=["GET"])
+def get_csrf():
+    return jsonify({"csrf_token": generate_csrf()})
+
+
+###
+# The functions below should be applicable to all Flask apps.
+###
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.headers.get(
+            "Authorization", None
+        )  # or request.cookies.get('token', None)
+
+        if not auth:
+            return (
+                jsonify(
+                    {
+                        "code": "authorization_header_missing",
+                        "description": "Authorization header is expected",
+                    }
+                ),
+                401,
+            )
+
+        parts = auth.split()
+
+        if parts[0].lower() != "bearer":
+            return (
+                jsonify(
+                    {
+                        "code": "invalid_header",
+                        "description": "Authorization header must start with Bearer",
+                    }
+                ),
+                401,
+            )
+        elif len(parts) == 1:
+            return (
+                jsonify({"code": "invalid_header",
+                        "description": "Token not found"}),
+                401,
+            )
+        elif len(parts) > 2:
+            return (
+                jsonify(
+                    {
+                        "code": "invalid_header",
+                        "description": "Authorization header must be Bearer + \s + token",
+                    }
+                ),
+                401,
+            )
+
+        token = parts[1]
+        try:
+            payload = jwt.decode(
+                token, app.config["SECRET_KEY"], algorithms=["HS256"])
+
+        except jwt.ExpiredSignatureError:
+            return (
+                jsonify({"code": "token_expired",
+                        "description": "token is expired"}),
+                401,
+            )
+        except jwt.DecodeError:
+            return (
+                jsonify(
+                    {
+                        "code": "token_invalid_signature",
+                        "description": "Token signature is invalid",
+                    }
+                ),
+                401,
+            )
+
+        g.current_user = user = payload
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+@app.route("/api/v1/register", methods=["POST"])
 def register():
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
-    firstname = data.get('firstname')
-    lastname = data.get('lastname')
-    email = data.get('email')
-    location = data.get('location', '')  # Provide default value if not present
-    # Provide default value if not present
-    biography = data.get('biography', '')
-    # Provide default value if not present
-    profile_photo = data.get('profile_photo', '')
-    joined_on = request.json.get('joined_on')
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        email = form.email.data
+        username = form.username.data
+        password = form.password.data
+        firstname = form.firstname.data
+        lastname = form.lastname.data
+        location = form.location.data
+        biography = form.biography.data
+        profile_photo = request.files["photo"]
+        profile_filename = secure_filename(profile_photo.filename)
+        profile_photo.save(os.path.join(
+            app.config["UPLOAD_FOLDER"], profile_filename))
+        new_user = User(
+            email=email,
+            username=username,
+            password=password,
+            firstname=firstname,
+            lastname=lastname,
+            location=location,
+            biography=biography,
+            profile_photo=profile_filename,
+        )
+        db.session.add(new_user)
+        db.session.commit()
 
-    # Check if required fields are present
-    if not (username and password and firstname and lastname and email):
-        return jsonify({'message': 'Missing required fields'}), 400
-
-    # Check if username already exists in database
-    if User.query.filter_by(username=username).first() is not None:
-        return jsonify({'error': 'Username already exists'}), 400
-
-    # Check if email already exists in database
-    if User.query.filter_by(email=email).first() is not None:
-        return jsonify({'error': 'Email already exists'}), 400
-
-    # Create a new user
-    new_user = User(username=username, password=password, firstname=firstname,
-                    lastname=lastname, email=email, location=location,
-                    biography=biography, profile_photo=profile_photo)
-
-    # Add the new user to the database
-    db.session.add(new_user)
-    db.session.commit()
-
-    return jsonify({'message': 'User registered successfully'})
+        return jsonify(
+            {
+                "message": "User Successfully added",
+                "email": new_user.email,
+                "username": new_user.username,
+                "password": new_user.password,
+                "firstname": new_user.firstname,
+                "lastname": new_user.lastname,
+                "location": new_user.location,
+                "biography": new_user.biography,
+                "profile_photo": new_user.profile_photo,
+                "created_on": new_user.joined_on,
+            }
+        )
+    else:
+        errors = form_errors(form)
+        return jsonify({"errors": errors}), 400
 
 
-@app.route('/api/v1/auth/login', methods=['POST'])
+@app.route("/api/v1/auth/login", methods=["POST"])
 def login():
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
+    form = LoginForm()
+    if form.validate_on_submit():
+        username = form.username.data
+        password = form.password.data
+        user = db.session.execute(
+            db.select(User).filter_by(username=username)
+        ).scalar()
+        if user:
+            # User exists, now verify the password
+            if check_password_hash(pwhash=user.password, password=password):
+                token = generate_token(user.id)
+                return jsonify(
+                    {
+                        "message": "User Successfully logged In",
+                        "token": token,
+                        "id": user.id,
+                    },
+                    200,
+                )
+            else:
+                return jsonify({"message": "Invalid username or password"}), 401
+        else:
+            return jsonify({"message": "User does not exist"}), 405
+    else:
+        errors = form_errors(form)
+        return jsonify({"errors": errors}), 400
 
-    user = User.query.filter_by(username=username).first()
 
-    if not user or not check_password_hash(user.password, password):
-        return jsonify({"message": "Invalid username or password"}), 401
-
-    access_token = create_access_token(identity=user.id)
-    return jsonify({"message": "User successfully logged in.","token": access_token})
-
-
-@app.route('/api/v1/auth/logout', methods=['POST'])
+@app.route("/api/v1/auth/logout", methods=["POST"])
+@requires_auth
 def logout():
-    return jsonify({'message': 'User logged out successfully'})
+    return jsonify({"message": "User successfully logged out."})
 
 
-@app.route('/api/v1/users/<int:user_id>/posts', methods=['POST'])
-@jwt_required()
-def create_post(user_id):
-    current_user_id = get_jwt_identity()
+@app.route("/api/v1/users/<user_id>/posts", methods=["POST"])
+@requires_auth
+def post(user_id):
+    form = PostForm()
+    if form.validate_on_submit():
+        photo = request.files["photo"]
+        photo_filename = secure_filename(photo.filename)
+        photo.save(os.path.join(app.config["UPLOAD_FOLDER"], photo_filename))
+        caption = form.caption.data
+        new_post = Post(caption=caption,
+                         photo=photo_filename, user_id=user_id)
+        db.session.add(new_post)
+        db.session.commit()
+        return jsonify({"message": "Successfully created a new post"}), 200
 
-    # Check if the current user is authorized to create a post for the specified user
-    if current_user_id != user_id:
-        return jsonify({"message": "Unauthorized"}), 401
-
-    # Extract photo and caption from the request JSON data
-    data = request.json
-    photo = data.get('photo')
-    # Assuming 'description' is the field name for caption
-    caption = data.get('description')
-
-    # Create a new Post object
-    new_post = Post(user_id=user_id, photo=photo, caption=caption)
-
-    # Add the new post to the database session and commit the transaction
-    db.session.add(new_post)
-    db.session.commit()
-
-    return jsonify({"message": "Successfully created a new post"}), 201
+    else:
+        errors = form_errors(form)
+        return jsonify({"errors": errors}), 400
 
 
-@app.route('/api/v1/users/<int:user_id>/posts', methods=['GET'])
-def get_posts(user_id):
-    # Retrieve the user object
-    user = User.query.get(user_id)
+@app.route("/api/user/<user_id>", methods=["GET"])
+def get_info(user_id):
+    user = db.session.execute(db.select(User).filter_by(id=user_id)).scalar()
+    posts_by_user = db.session.execute(
+        db.select(Post).filter_by(user_id=user_id)
+    ).fetchall()
+    user_post_count = len(posts_by_user)
+    user_followers = db.session.execute(
+        db.select(Follow).filter_by(user_id=user_id)
+    ).fetchall()
+    user_followers_count = len(user_followers)
+    if user:
+        return jsonify(
+            {
+                "fullname": user.firstname + " " + user.lastname,
+                "location": user.location,
+                "joined": user.joined_on,
+                "biography": user.biography,
+                "profile": user.profile_photo,
+                "posts": user_post_count,
+                "follows": user_followers_count,
+            }
+        )
+    else:
+        return jsonify({"error": "error occured"})
 
-    # Check if the user exists
-    if user is None:
-        return jsonify({'message': 'User not found'}), 404
 
-    # Retrieve the posts associated with the user
-    posts = user.user_posts
-
-    # Serialize posts into the desired JSON format
-    serialized_posts = []
+@app.route("/api/v1/users/<user_id>/posts", methods=["GET"])
+@requires_auth
+def get_post(user_id):
+    posts = Post.query.filter_by(user_id=user_id).all()
+    post_list = []
     for post in posts:
-        serialized_post = {
+        post_data = {
             "id": post.id,
-            "user_id": post.user_id,
+            "user_id": user_id,
             "photo": post.photo,
-            "description": post.caption,
-            "created_on": post.created_on
+            "caption": post.caption,
+            "created_on": post.created_on,
         }
-        serialized_posts.append(serialized_post)
+        post_list.append(post_data)
+    return jsonify({"posts": post_list})
 
-    return jsonify({'posts': serialized_posts})
 
-
-@app.route('/api/v1/users/<int:user_id>/follow', methods=['POST'])
-@jwt_required()
+@app.route("/api/users/<user_id>/follow", methods=["POST"])
+@requires_auth
 def follow_user(user_id):
-    current_user_id = get_jwt_identity()
+    target_id = user_id
+    follower_id = request.json["id"]
 
-    new_follow = Follow(follower_id=current_user_id, user_id=user_id)
+    if target_id == follower_id:
+        return jsonify({"message": "Cannot follow yourself"}), 400
+
+    existing_follow = Follow.query.filter_by(
+        user_id=target_id, follower_id=follower_id
+    ).first()
+
+    if existing_follow:
+        return jsonify({"message": "You are already following this user"}), 400
+
+    new_follow = Follow(user_id=target_id, follower_id=follower_id)
     db.session.add(new_follow)
     db.session.commit()
 
-    return jsonify({"message": "You are now following that user."}), 201
+    return jsonify({"message": "You are now following that user"}), 200
 
-@app.route('/api/v1/posts', methods=['GET'])
-def allposts():
+@app.route("/api/v1/posts", methods=["GET"])
+@requires_auth
+def get_all_post():
     posts = Post.query.all()
-    serialized_posts = []
+    post_list = []
     for post in posts:
-        serialized_post = {
+        usecase = User.query.filter_by(id=post.user_id).first()
+        post_data = {
             "id": post.id,
             "user_id": post.user_id,
             "photo": post.photo,
             "caption": post.caption,
-            "created_on": post.created_on.strftime("%Y-%m-%d %H:%M:%S"),
-            # Assuming 'likes' is a relationship in the Post model
-            "likes": len(post.likes)
+            "created_on": post.created_on,
+            "likes": Like.query.filter_by(id=post.id).count(),
+            "username": usecase.username,
+            "profile": usecase.profile_photo,
         }
-        serialized_posts.append(serialized_post)
-    return jsonify({'posts': serialized_posts})
+        post_list.append(post_data)
+    return jsonify({"posts": post_list})
 
 
-@app.route('/api/v1/posts/<int:post_id>/like', methods=['POST'])
-@jwt_required()
+@app.route("/api/v1/posts/<post_id>/like", methods=["POST"])
+@requires_auth
 def like(post_id):
-    current_user_id = get_jwt_identity()
-
-    like = Like.query.filter_by(
-        post_id=post_id, user_id=current_user_id).first()
-    if like:
-        return jsonify({"message": "You have already liked this post"}), 400
-
-    new_like = Like(post_id=post_id, user_id=current_user_id)
+    user_id = request.json["user_id"]
+    existing_like = Like.query.filter_by(
+        post_id=post_id, user_id=user_id).first()
+    if existing_like:
+        return jsonify({"message": "You have already liked this post"}, 400)
+    new_like = Like(post_id=post_id, user_id=user_id)
     db.session.add(new_like)
     db.session.commit()
-
-    total_likes = Like.query.filter_by(post_id=post_id).count()
-
-    return jsonify({"message": "Post liked!", "likes": total_likes}), 201
-
-# Route to add a post to a user's feed
+    num_likes = Like.query.filter_by(post_id=post_id).count()
+    return jsonify({"message": "Post liked!", "Likes": num_likes}), 200
 
 
-# The functions below should be applicable to all Flask apps
+@app.route("/api/v1/uploads/<filename>")
+def get_images(filename):
+    return send_from_directory(
+        os.path.join(os.getcwd(), app.config["UPLOAD_FOLDER"]), filename
+    )
 
-# Define a function to collect form errors from Flask-WTF
+
+@app.route("/api/v1/generate-token/<uid>", methods=["POST"])
+def generate_token(uid):
+    timestamp = datetime.datetime.utcnow()
+    payload = {
+        "uid": uid,
+        "iat": timestamp,
+        "exp": timestamp + datetime.timedelta(minutes=10),
+    }
+    token = jwt.encode(payload, app.config["SECRET_KEY"], algorithm="HS256")
+    return token
 
 
+@app.route("/api/v1/decode-token", methods=["POST"])
+def decode_token():
+    token = request.json
+    detoken = jwt.decode(
+        token.value, app.config["SECRET_KEY"], algorithm="HS256")
+    return jsonify(token=detoken.uid)
+
+
+# Here we define a function to collect form errors from Flask-WTF
+# which we can later use
 def form_errors(form):
     error_messages = []
+    """Collects form errors"""
     for field, errors in form.errors.items():
         for error in errors:
-            message = f"Error in the {getattr(form, field).label.text} field - {error}"
+            message = "Error in the %s field - %s" % (
+                getattr(form, field).label.text,
+                error,
+            )
             error_messages.append(message)
+
     return error_messages
 
 
-@app.route('/<file_name>.txt')
+@app.route("/<file_name>.txt")
 def send_text_file(file_name):
-    file_dot_text = file_name + '.txt'
+    """Send your static text file."""
+    file_dot_text = file_name + ".txt"
     return app.send_static_file(file_dot_text)
 
 
 @app.after_request
 def add_header(response):
-    response.headers['X-UA-Compatible'] = 'IE=Edge,chrome=1'
-    response.headers['Cache-Control'] = 'public, max-age=0'
+    """
+    Add headers to both force latest IE rendering engine or Chrome Frame,
+    and also tell the browser not to cache the rendered page. If we wanted
+    to we could change max-age to 600 seconds which would be 10 minutes.
+    """
+    response.headers["X-UA-Compatible"] = "IE=Edge,chrome=1"
+    response.headers["Cache-Control"] = "public, max-age=0"
     return response
-
-
-@app.errorhandler(404)
-def page_not_found(error):
-    return render_template('404.html'), 404
